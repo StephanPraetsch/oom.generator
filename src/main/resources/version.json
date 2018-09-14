@@ -1,5 +1,0 @@
-{
-  "Version": "${project.version}",
-  "Repository": "${repository}"
-}
-

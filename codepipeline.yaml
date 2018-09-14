@@ -7,6 +7,15 @@ Parameters:
   ClusterSecurityGroup:
     Type: AWS::EC2::SecurityGroup::Id
     Description: SecurityGroupId of the ECS instances
+  Vpc:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC of the ECS Cluster
+  FirstAlbSubnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: First subnet for the ALB
+  SecondAlbSubnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: Second subnet for the ALB
   ProjectOwner:
     Type: String
     Default: StephanPraetsch
@@ -29,7 +38,7 @@ Parameters:
     Description: Cloudformation stack name
   ECRRepositoryName:
     Type: String
-    Default: oom-generator
+    Default: oom.generator
     Description: Name of the ECR repository
   CreateEcrRepository:
     Type: String
@@ -55,6 +64,28 @@ Resources:
     Condition: CreateECR
     Properties:
       RepositoryName: !Ref ECRRepositoryName
+      RepositoryPolicyText:
+        Version: 2012-10-17
+        Statement:
+          - Sid: PullAccess
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
+          - Sid: PushAccess
+            Effect: Allow
+            Principal:
+              AWS:
+                - !GetAtt CodeBuildServiceRole.Arn
+            Action:
+              - ecr:PutImage
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
   CodePipelineS3Bucket:
     Type: AWS::S3::Bucket
     Condition: CreateS3
@@ -117,12 +148,15 @@ Resources:
                   {
                     "ClusterName": "${ClusterName}",
                     "ClusterSecurityGroup": "${ClusterSecurityGroup}",
-                    "Repository": {"Fn::GetParam": ["docker-and-template", "version.json", "Repository"]},
-                    "Tag": {"Fn::GetParam": ["docker-and-template", "version.json",  "Version"]}
+                    "Vpc": "${Vpc}",
+                    "FirstAlbSubnet": "${FirstAlbSubnet}",
+                    "SecondAlbSubnet": "${SecondAlbSubnet}",
+                    "Image": {"Fn::GetParam": ["docker-and-template", "target/image_info.json", "image"]}
                   }
                 RoleArn: !ImportValue CFRoleArn
                 StackName: !Ref StackName
                 TemplatePath: docker-and-template::ecs.yaml
+                TemplateConfiguration: docker-and-template::ecs.config
               RunOrder: 1
   CodeBuildDockerMaven:
     Type: AWS::CodeBuild::Project
@@ -134,22 +168,28 @@ Resources:
         BuildSpec: |
           version: 0.2
           phases:
+            install:
+              commands:
+                - apt-get update -y
+                - apt-get install -y software-properties-common
+                - add-apt-repository ppa:openjdk-r/ppa
+                - apt-get update -y
+                - apt-get install -y openjdk-8-jdk
+                - apt-get install -y maven
             pre_build:
               commands:
-                - $(aws ecr get-login --region $AWS_DEFAULT_REGION)
+                - eval $(aws ecr get-login --region $AWS_DEFAULT_REGION | sed -e 's/-e none//g')
             build:
               commands:
                 - mvn deploy -DawsAccountId=$AWS_ACCOUNT_ID -DawsRegion=$AWS_DEFAULT_REGION
-            post_build:
-              commands:
-                - cat target/classes/version.json
           artifacts:
             files:
               - ecs.yaml
-              - target/classes/version.json
+              - target/image_info.json
+              - ecs.config
       Environment:
         ComputeType: BUILD_GENERAL1_MEDIUM
-        Image: aws/codebuild/eb-java-8-amazonlinux-64:2.4.3
+        Image: aws/codebuild/docker:17.09.0
         Type: LINUX_CONTAINER
         EnvironmentVariables:
           - Name: AWS_DEFAULT_REGION
@@ -193,9 +233,15 @@ Resources:
                   - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*
               - Sid: s3Permissions
                 Action:
-                  - s3:*
+                  - s3:GetBucketVersioning
+                  - s3:ListBucketVersions
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
                 Effect: Allow
-                Resource: '*'
+                Resource:
+                  - !Sub arn:aws:s3:::${S3BucketName}
+                  - !Sub arn:aws:s3:::${S3BucketName}/*
   CodeBuildServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -233,3 +279,14 @@ Resources:
                 Effect: Allow
                 Resource:
                   - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepositoryName}
+              - Sid: s3Permissions
+                Action:
+                  - s3:GetBucketVersioning
+                  - s3:ListBucketVersions
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:s3:::${S3BucketName}
+                  - !Sub arn:aws:s3:::${S3BucketName}/*

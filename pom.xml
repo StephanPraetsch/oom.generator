@@ -22,7 +22,6 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <java.version>1.8</java.version>
-        <repository>${awsAccountId}.dkr.ecr.${awsRegion}.amazonaws.com/${project.artifactId}</repository>
 	</properties>
 
     <dependencies>
@@ -39,6 +38,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <dependency>
+			<groupId>io.logz.logback</groupId>
+			<artifactId>logzio-logback-appender</artifactId>
+			<version>1.0.16</version>
+		</dependency>
     </dependencies>
 
     <build>
@@ -74,6 +78,7 @@
 				<artifactId>docker-maven-plugin</artifactId>
 				<version>1.1.1</version>
 				<configuration>
+					<imageName>${project.artifactId}:${project.version}</imageName>
 					<dockerDirectory>${project.basedir}/src/main/docker</dockerDirectory>
 					<resources>
 						<resource>
@@ -86,6 +91,7 @@
 				<executions>
 					<execution>
 						<id>build-image</id>
+						<phase>package</phase>
 				        <goals>
 							<goal>build</goal>
 				        </goals>
@@ -114,21 +120,5 @@
 				</executions>
 			</plugin>
         </plugins>
-        <resources>
-			<resource>
-				<directory>src/main/resources</directory>
-				<filtering>true</filtering>
-				<includes>
-					<include>**/version.json</include>
-				</includes>
-			</resource>
-			<resource>
-				<directory>src/main/resources</directory>
-				<filtering>false</filtering>
-				<excludes>
-					<exclude>**/version.json</exclude>
-				</excludes>
-			</resource>
-		</resources>
     </build>
 </project>
