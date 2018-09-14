@@ -1,0 +1,235 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Deploy the oom.generator on a ECS Cluster
+Parameters:
+  ClusterName:
+    Type: String
+    Description: Name of the ECS Cluster
+  ClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: SecurityGroupId of the ECS instances
+  ProjectOwner:
+    Type: String
+    Default: StephanPraetsch
+    Description: Github project owner
+  ProjectName:
+    Type: String
+    Default: oom.generator
+    Description: Github project name
+  BranchName:
+    Type: String
+    Default: master
+    Description: Github branch name
+  OAuthToken:
+    Type: String
+    NoEcho: True
+    Description: Github OAuthToken
+  StackName:
+    Type: String
+    Default: oom-generator
+    Description: Cloudformation stack name
+  ECRRepositoryName:
+    Type: String
+    Default: oom-generator
+    Description: Name of the ECR repository
+  CreateEcrRepository:
+    Type: String
+    AllowedValues: [yes, no]
+    Default: yes
+    Description: Create ECR repository?
+  S3BucketName:
+    Type: String
+    Description: Name of the S3 bucket for the CodePipeline
+  CreateCodePipelineS3Bucket:
+    Type: String
+    AllowedValues: [yes, no]
+    Default: yes
+    Description: Create S3 bucket for CodePipeline?
+
+Conditions:
+  CreateECR: !Equals [!Ref CreateEcrRepository, yes]
+  CreateS3: !Equals [!Ref CreateCodePipelineS3Bucket, yes]
+
+Resources:
+  EcrRepo:
+    Type: AWS::ECR::Repository
+    Condition: CreateECR
+    Properties:
+      RepositoryName: !Ref ECRRepositoryName
+  CodePipelineS3Bucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateS3
+    Properties:
+      BucketName: !Ref S3BucketName
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Type: S3
+        Location: !Ref S3BucketName
+      Name: !Sub ${ProjectName}-${BranchName}
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+        - Name: !Ref ProjectName
+          Actions:
+            - Name: GithubProject
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1
+              Configuration:
+                Owner: !Ref ProjectOwner
+                Repo: !Ref ProjectName
+                Branch: !Ref BranchName
+                OAuthToken: !Ref OAuthToken
+              OutputArtifacts:
+                - Name: source
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: DockerMaven
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildDockerMaven
+              InputArtifacts:
+                - Name: source
+              OutputArtifacts:
+                - Name: docker-and-template
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: !Ref ProjectName
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              InputArtifacts:
+                - Name: docker-and-template
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_NAMED_IAM
+                ParameterOverrides: !Sub |
+                  {
+                    "ClusterName": "${ClusterName}",
+                    "ClusterSecurityGroup": "${ClusterSecurityGroup}",
+                    "Repository": {"Fn::GetParam": ["docker-and-template", "version.json", "Repository"]},
+                    "Tag": {"Fn::GetParam": ["docker-and-template", "version.json",  "Version"]}
+                  }
+                RoleArn: !ImportValue CFRoleArn
+                StackName: !Ref StackName
+                TemplatePath: docker-and-template::ecs.yaml
+              RunOrder: 1
+  CodeBuildDockerMaven:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - $(aws ecr get-login --region $AWS_DEFAULT_REGION)
+            build:
+              commands:
+                - mvn deploy -DawsAccountId=$AWS_ACCOUNT_ID -DawsRegion=$AWS_DEFAULT_REGION
+            post_build:
+              commands:
+                - cat target/classes/version.json
+          artifacts:
+            files:
+              - ecs.yaml
+              - target/classes/version.json
+      Environment:
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/eb-java-8-amazonlinux-64:2.4.3
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+      Name: maven-docker-deploy
+      ServiceRole: !Ref CodeBuildServiceRole
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildCloudFormationAndPassRole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: generalPermissions
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - iam:PassRole
+                Effect: Allow
+                Resource: '*'
+              - Sid: cfStackPermissions
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*
+              - Sid: s3Permissions
+                Action:
+                  - s3:*
+                Effect: Allow
+                Resource: '*'
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: EcrAndLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: generalPermissions
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ecr:GetAuthorizationToken
+                Effect: Allow
+                Resource: '*'
+              - Sid: ecrArtifactImageRepositoryPushPermissions
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepositoryName}

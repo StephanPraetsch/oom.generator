@@ -1,0 +1,327 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: rt-rest service
+Parameters:
+  ServiceName:
+    Type: String
+  Tag:
+    Type: String
+  ClusterName:
+    Type: String
+    Default: testCluster
+  ClusterSecurityGroup:
+    Type: String
+  DesiredCount:
+    Type: Number
+    Default: 2
+  Repository:
+    Type: String
+  DBName:
+    Type: String
+  DBMasterPassword:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '[A-Za-z0-9]{14,}'
+Resources:
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ServiceName}-ecs-service-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ServiceName}-task-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess
+      Policies:
+        - PolicyName: AutoScaling
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: generalPermissions
+                Action:
+                  - autoscaling:DescribeAutoScalingInstances
+                Effect: Allow
+                Resource: '*'
+        - PolicyName: RdsAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: generalPermissions
+                Action:
+                  - autoscaling:DescribeAutoScalingInstances
+                Effect: Allow
+                Resource: '*'
+              - Sid: rdsPermissions
+                Action:
+                  - rds:DescribeDBInstances
+                Effect: Allow
+                Resource: !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:${Postgres}
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Ref ServiceName
+      Cluster: !Ref ClusterName
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      Role: !Ref ECSServiceRole
+      HealthCheckGracePeriodSeconds: 90
+      LoadBalancers:
+        - ContainerName: !Sub ${ServiceName}-container
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup
+    DependsOn:
+      - LoadBalancerListener
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Family: !Sub ${ServiceName}-task-definition
+      ContainerDefinitions:
+        - Name: !Sub ${ServiceName}-container
+          Image: !Sub ${Repository}:${Tag}
+          Environment:
+            - Name: JAVA_OPTS
+              Value: -Xms128m -Xmx256m
+            - Name: AWS_ACCOUNTNAME
+              Value: !ImportValue account-name
+            - Name: STAGE
+              Value: !ImportValue stage
+            - Name: AUTH0_DOMAIN
+              Value: !ImportValue auth0-domain
+            - Name: FRONTEND_DOMAIN
+              Value: !Join [ '.' , [ portal , !ImportValue unite-eu-domain-name ] ]
+            - Name: CoreLogzIOToken
+              Value: !ImportValue CoreLogzIOToken
+            - Name: AWS_DEFAULT_REGION
+              Value: !Ref AWS::Region
+            - Name: RELEASE_VERSION
+              Value: !Sub ${ServiceName}:${Tag}
+            - Name: OOM_SNS_TOPIC_ARN
+              Value: !ImportValue CoreInternalStackNotificationsArn
+          Essential: true
+          Memory: 512
+          PortMappings:
+            - ContainerPort: 8080
+              HostPort: 0
+          Privileged: false
+      Volumes: []
+  ExternalLoadBalancerDnsName:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !ImportValue unite-services-hosted-zone-id
+      Comment: Zone apex alias targeted to the rt-rest LoadBalancer.
+      RecordSets:
+       - Name: !Join [ '.' , [ retoure , !ImportValue unite-services-domain-name ] ]
+         Type: A
+         AliasTarget:
+          HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+          DNSName: !GetAtt LoadBalancer.DNSName
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+        - !ImportValue vpc-sub-pub-a1
+        - !ImportValue vpc-sub-pub-b1
+        - !ImportValue vpc-sub-pub-c1
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Tags:
+        - Key: owner
+          Value: it.core
+        - Key: environment
+          Value: !ImportValue stage
+        - Key: ServiceName
+          Value: !Sub ${ServiceName}
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+        - CertificateArn: !ImportValue unite-services-cert-arn-eu-central-1
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: LoadBalancer
+    Properties:
+      VpcId: !ImportValue vpc
+      Port: 8080
+      Protocol: HTTP
+      Matcher:
+        HttpCode: 200
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /management/health
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+      Tags:
+        - Key: owner
+          Value: it.core
+        - Key: environment
+          Value: !ImportValue stage
+        - Key: ServiceName
+          Value: !Sub ${ServiceName}
+  ListenerRuleForManagement:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: TargetGroup
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/management/health"
+      ListenerArn:
+        Ref: LoadBalancerListener
+      Priority: 1
+  ListenerRuleForHealth:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: TargetGroupEmpty
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/management*"
+      ListenerArn:
+        Ref: LoadBalancerListener
+      Priority: 2
+  TargetGroupEmpty:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: LoadBalancer
+    Properties:
+      VpcId: !ImportValue vpc
+      Port: 8080
+      Protocol: HTTP
+      Tags:
+        - Key: owner
+          Value: it.core
+        - Key: environment
+          Value: !ImportValue stage
+        - Key: ServiceName
+          Value: !Sub ${ServiceName}
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName}-alb
+      VpcId: !ImportValue vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ALB-SG
+        - Key: owner
+          Value: it.core
+        - Key: environment
+          Value: !ImportValue stage
+        - Key: ServiceName
+          Value: !Sub ${ServiceName}
+  DockerSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ClusterSecurityGroup
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 32768
+      ToPort: 61000
+  LoadBalancerSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      CidrIp: 0.0.0.0/0
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+  PostgresSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub ${ServiceName}-DB-SubnetGroup
+      SubnetIds:
+        - !ImportValue vpc-sub-pub-a1
+        - !ImportValue vpc-sub-pub-b1
+        - !ImportValue vpc-sub-pub-c1
+      Tags:
+        - Key: owner
+          Value: it.core
+        - Key: environment
+          Value: !ImportValue stage
+        - Key: ServiceName
+          Value: !Sub ${ServiceName}
+  Postgres:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Sub ${DBName}
+      DBSubnetGroupName: !Ref PostgresSubnetGroup
+      AllocatedStorage: 10
+      DBInstanceClass: db.m3.medium
+      StorageEncrypted: true
+      Engine: postgres
+      EngineVersion: 10.3
+      MultiAZ: true
+      MasterUsername: adminadmin
+      MasterUserPassword: !Ref DBMasterPassword
+      DBInstanceIdentifier: !Sub ${ServiceName}-postgres
+      StorageType: gp2
+      VPCSecurityGroups:
+        - !Ref PostgresSecurityGroup
+      Tags:
+        - Key: owner
+          Value: it.core
+        - Key: environment
+          Value: !ImportValue stage
+        - Key: ServiceName
+          Value: !Sub ${ServiceName}
+    DeletionPolicy: Snapshot
+  PostgresSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow postgres access
+      VpcId: !ImportValue vpc
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 5432
+        ToPort: 5432
+        SourceSecurityGroupId: !Ref ClusterSecurityGroup
+
+Outputs:
+  AcRestRootUrl:
+    Description: url to access the REST root
+    Value: !Join [ '.' , [ 'https://retoure' , !ImportValue unite-services-domain-name ] ]
+  LoadBalancerFullName:
+    Description: The full name of rt-rest LoadBalancer
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
+    Export:
+      Name: RtRestLoadBalancerFullName
+  TargetGroupFullName:
+    Description: The full name of rt-rest TargetGroup
+    Value: !GetAtt TargetGroup.TargetGroupFullName
+    Export:
+      Name: RtRestTargetGroupFullName
