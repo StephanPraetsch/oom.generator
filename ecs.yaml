@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS CloudFormation template for cAdvisor
+Parameters:
+  ClusterName:
+    Type: String
+  ClusterSecurityGroup:
+    Type: String
+  Vpc:
+    Type: AWS::EC2::VPC::Id
+  FirstAlbSubnet:
+    Type: AWS::EC2::Subnet::Id
+  SecondAlbSubnet:
+    Type: AWS::EC2::Subnet::Id
+  ServiceName:
+    Type: String
+  Image:
+    Type: String
+  DesiredCount:
+    Type: Number
+    Default: 3
+  LogzioToken:
+    Type: String
+    Default: none
+Resources:
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ServiceName}-ecs-service-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole
+  EcsSerciceTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ServiceName}-task-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+  EcsServiceTaskDefinition:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      TaskRoleArn: !GetAtt EcsSerciceTaskRole.Arn
+      Family: !Sub '${ServiceName}-task-definition'
+      ContainerDefinitions:
+        - Name: !Sub '${ServiceName}-container-definition'
+          Image: !Ref Image
+          Environment:
+            - Name: JAVA_OPTS
+              Value: -Xms256m -Xmx800m
+            - Name: AWS_ACCOUNT_ID
+              Value: !Ref AWS::AccountId
+            - Name: LOGZIO_TOKEN
+              Value: !Ref LogzioToken
+          Essential: true
+          Memory: 1000
+          Cpu: 10
+          PortMappings:
+            - ContainerPort: 8080
+              HostPort: 0
+  EcsService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ClusterName
+      Role: !Ref ECSServiceRole
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      HealthCheckGracePeriodSeconds: 60
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref EcsServiceTaskDefinition
+      LaunchType: EC2
+      LoadBalancers:
+        - ContainerName: !Sub '${ServiceName}-container-definition'
+          ContainerPort: 8080
+          TargetGroupArn: !Ref EcsTargetGroup
+    DependsOn:
+      - EcsAlbListener
+  EcsAlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref EcsAlb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref EcsTargetGroup
+  EcsTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: EcsAlb
+    Properties:
+      VpcId: !Ref Vpc
+      Port: 8080
+      Protocol: HTTP
+      Matcher:
+        HttpCode: 200
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /actuator/health
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+  EcsAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${ServiceName}-alb
+      VpcId: !Ref Vpc
+  EcsAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+        - !Ref FirstAlbSubnet
+        - !Ref SecondAlbSubnet
+      SecurityGroups:
+        - !Ref EcsAlbSecurityGroup
+  DockerSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ClusterSecurityGroup
+      SourceSecurityGroupId: !Ref EcsAlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 32768
+      ToPort: 61000
+  EcsServiceSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ClusterSecurityGroup
+      SourceSecurityGroupId: !Ref EcsAlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 32768
+      ToPort: 61000
+      Description: !Ref ServiceName
+  EcsAlbSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EcsAlbSecurityGroup
+      CidrIp: 0.0.0.0/0
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80

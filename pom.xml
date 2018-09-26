@@ -22,7 +22,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <java.version>1.8</java.version>
-    </properties>
+	</properties>
 
     <dependencies>
         <dependency>
@@ -38,15 +38,87 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <dependency>
+			<groupId>io.logz.logback</groupId>
+			<artifactId>logzio-logback-appender</artifactId>
+			<version>1.0.16</version>
+		</dependency>
     </dependencies>
 
     <build>
+        <finalName>oom.generator</finalName>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+					<mainClass>com.mercateo.oom.generator.Application</mainClass>
+					<layout>ZIP</layout>
+				</configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                        <configuration>
+                            <executable>true</executable>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
+			<plugin>
+			    <groupId>org.apache.maven.plugins</groupId>
+			    <artifactId>maven-deploy-plugin</artifactId>
+			    <configuration>
+			        <skip>true</skip>
+			    </configuration>
+			</plugin>
+            <plugin>
+				<groupId>com.spotify</groupId>
+				<artifactId>docker-maven-plugin</artifactId>
+				<version>1.1.1</version>
+				<configuration>
+					<imageName>${project.artifactId}:${project.version}</imageName>
+					<dockerDirectory>${project.basedir}/src/main/docker</dockerDirectory>
+					<resources>
+						<resource>
+							<targetPath>/</targetPath>
+							<directory>${project.build.directory}</directory>
+							<include>${project.build.finalName}.jar</include>
+						</resource>
+					</resources>
+				</configuration>
+				<executions>
+					<execution>
+						<id>build-image</id>
+						<phase>package</phase>
+				        <goals>
+							<goal>build</goal>
+				        </goals>
+				    </execution>
+				    <execution>
+				        <id>tag-image</id>
+				        <phase>package</phase>
+				        <goals>
+							<goal>tag</goal>
+				        </goals>
+				        <configuration>
+							<image>${project.artifactId}:${project.version}</image>
+							<newName>${awsAccountId}.dkr.ecr.${awsRegion}.amazonaws.com/${project.artifactId}:${project.version}</newName>
+				        </configuration>
+				    </execution>
+				    <execution>
+				        <id>push-image</id>
+				        <phase>deploy</phase>
+				        <goals>
+							<goal>push</goal>
+				        </goals>
+				        <configuration>
+							<imageName>${awsAccountId}.dkr.ecr.${awsRegion}.amazonaws.com/${project.artifactId}:${project.version}</imageName>
+				        </configuration>
+				    </execution>
+				</executions>
+			</plugin>
         </plugins>
     </build>
-
 </project>
