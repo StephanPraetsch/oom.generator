@@ -40,11 +40,11 @@ java -jar target/oom.generator-0.0.1-SNAPSHOT.jar
   ```
   aws ecr get-login --region <aws_region>
   ```
-1. build and push the oom.generator in your ECR
+2. build and push the oom.generator in your ECR
   ```
   mvn clean deploy -DawsAccountId=<aws_account_id> -DawsRegion=<aws_region>
   ```
-1. deploy the generated Image in your ECS Cluster
+3. deploy the generated Image in your ECS Cluster
   ```
   aws cloudformation create-stack --stack-name oom-generator --template-body file://ecs.yaml --parameters ParameterKey=ClusterName,ParameterValue="<ecs_cluster_name>" ParameterKey=ClusterSecurityGroup,ParameterValue="<ecs_cluster_security_group>" ParameterKey=DesiredCount,ParameterValue="<ecs_service_desired_count>"  ParameterKey=FirstAlbSubnet,ParameterValue="<first_application_loadbalancer_subnet>" ParameterKey=SecondAlbSubnet,ParameterValue="<second_application_loadbalancer_subnet>" ParameterKey=Image,ParameterValue="<ecr_image>" ParameterKey=ServiceName,ParameterValue="<ecs_service_name>" ParameterKey=Vpc,ParameterValue="<ecs_cluster_vpc>"
   ```
@@ -65,4 +65,3 @@ java -jar target/oom.generator-0.0.1-SNAPSHOT.jar
     ```
     aws cloudformation create-stack --stack-name oom-build-deployment --template-body file://codepipeline.yaml --parameters ParameterKey=ClusterName,ParameterValue="ecs-cluster" ParameterKey=ClusterSecurityGroup,ParameterValue="sg-a1496acc>" ParameterKey=CreateCodePipelineS3Bucket,ParameterValue="true" ParameterKey=S3BucketName,ParameterValue="oom-generator" ParameterKey=CreateEcrRepository,ParameterValue="true" ParameterKey=ECRRepositoryName,ParameterValue="oom-generator" ParameterKey=FirstAlbSubnet,ParameterValue="subnet-42799629" ParameterKey=SecondAlbSubnet,ParameterValue="subnet-42799630" ParameterKey=OAuthToken,ParameterValue="92d923ada93757********" ParameterKey=ProjectOwner,ParameterValue="StephanPraetsch" ParameterKey=ProjectName,ParameterValue="oom.generator" ParameterKey=StackName,ParameterValue="oom-generator" ParameterKey=Vpc,ParameterValue="vpc-7148111c"
     ```
-  1.
